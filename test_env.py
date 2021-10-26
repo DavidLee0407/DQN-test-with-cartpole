@@ -27,7 +27,7 @@ class TestEnv():
             reward = 0
             if check_if_end(self.state):
                 done = True
-                reward = 10
+                reward = 1
                 return self.state, reward, done
             else:
                 done = False
