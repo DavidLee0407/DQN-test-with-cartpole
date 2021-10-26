@@ -5,41 +5,46 @@ import pickle, time
 import torch
 import matplotlib.pyplot as plt
 from collections import deque
+from exp_rep import Experience_Replay
 
+scores = []
 mylist = []
-learning_rate = 1e-2
-discount = 0.99
-EPSILON_DECAY = 0.999
+learning_rate = 1e-3
+discount = 0.95
+EPSILON_DECAY = 0.99
 epsilon = 1
-loss_fn = torch.nn.MSELoss()
-epochs = 15_000
+loss_fn = torch.nn.HuberLoss()
+epochs = 2_000
 losses = []
 
-#torch.load(r'model_Test.pt')
 model = None
 if model is None:
     model = torch.nn.Sequential(
-    torch.nn.Linear(3, 150),
-    torch.nn.ReLU(),
-    torch.nn.Linear(150, 100),
-    torch.nn.ReLU(),
-    torch.nn.Linear(100, 3))
+    torch.nn.Linear(3, 64),
+    torch.nn.LeakyReLU(),
+    torch.nn.Linear(64, 256),
+    torch.nn.LeakyReLU(),
+    torch.nn.Linear(256, 128),
+    torch.nn.LeakyReLU(),
+    torch.nn.Linear(128, 3))
 
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-
 
 def get_state(state):
     return torch.from_numpy(state).float()
 
-def initial_population():
+def train_model():
     epsilon = 1
     env = TestEnv()
+    score = 0
+    memory = Experience_Replay()
 
     for i in range(0, epochs):
         env.reset()
-        initial_state_ = env.reset() + np.random.rand(1,3)/10.0
+        initial_state_ = env.reset() 
         initial_state = initial_state_.squeeze()
         done = False
+        score = 0
 
         while not done:
 
@@ -50,32 +55,30 @@ def initial_population():
             else:
                 action = random.randint(0,2)
             
-            new_state_, reward, done = env.step(action)
-            new_state = new_state_ + np.random.rand(1,3)/10.0
-            #if reward==1: mylist.append(i)
-
-            if not done:
-                with torch.no_grad():
-                    newQ = model(get_state(new_state))
-                maxQ = torch.max(newQ)
-                Y = (reward + (discount * maxQ))
-            else:
-                Y = reward  # learning rate?
-
-            Y = torch.Tensor([Y]).detach()
-            #Y.requires_grad = True
-            x = qval[action]
-            X = torch.tensor([x])
-            X.requires_grad = True
-            loss = loss_fn(X, Y)
-
-            optimizer.zero_grad()
-            loss.backward()
-            losses.append(loss.item())
-            optimizer.step()
-
+            new_state, reward, done = env.step(action)
+            done_mask = 1.0 if done else 0.0
+            memory.put((initial_state, action, reward, new_state, done_mask))
             initial_state = new_state
+            score += reward
+            if done:break
 
+            if len(memory.buffer) > memory.min_len:
+                s_T, a_T, r_T, s2_T, d_T = memory.sample()
+                Q1 = model(s_T)
+                with torch.no_grad():
+                    Q2 = model(s2_T)
+                    max_Q2 = Q2.max(1)[0].unsqueeze(1)
+
+                Y = (r_T + discount * ((1 - d_T) * max_Q2)).float()
+                X = Q1.gather(1, a_T)
+
+                loss = loss_fn(X, Y.detach())
+                losses.append(loss.item())
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                
+        scores.append(score)
         if epsilon > 0.1:
             epsilon = epsilon * EPSILON_DECAY
         else:
@@ -105,18 +108,23 @@ def env_test():
             print(new_state, reward)
     #env_test()
 
-initial_population()
-plt.figure(figsize=(10,7))
-plt.plot(losses)
-plt.xlabel("Epochs",fontsize=22)
-plt.ylabel("Loss",fontsize=22)
-plt.show()
-torch.save(model, 'model_Test.pt')
-#play_few_games(1)
-#print(len(mylist))
-with torch.no_grad():
-    print(model(torch.Tensor([1,1,0])))
-    print(model(torch.Tensor([1,0,1])))
-    print(model(torch.Tensor([0,1,1])))
-play_few_games(2)
-#env_test()
+def show_graph():
+    plt.figure(figsize=(10,7))
+    plt.plot(losses)
+    plt.xlabel("Epochs",fontsize=22)
+    plt.ylabel("Loss",fontsize=22)
+    plt.show()
+    #torch.save(model, 'model_Test.pt')
+    plt.plot(scores)
+    plt.xlabel("Epochs",fontsize=22)
+    plt.ylabel("Scores",fontsize=22)
+    plt.show()
+    with torch.no_grad():
+        print(model(torch.Tensor([0,1,1])))
+        print(model(torch.Tensor([1,0,1])))
+        print(model(torch.Tensor([1,1,0])))
+        print(model(torch.Tensor([0,0,0])))
+
+train_model()
+show_graph()
+
