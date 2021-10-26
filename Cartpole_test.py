@@ -1,21 +1,20 @@
 import torch, gym, numpy as np
 import matplotlib.pyplot as plt
-import random
 from collections import deque
+from exp_rep import Experience_Replay
 
-batch_size = 32
-max_len = 50_000
+env = gym.make('CartPole-v0')
 scores = []
-learning_rate, discount, epochs = 1e-3, 0.95, 10_000
-EPSILON_DECAY = 0.999
+losses = []
+learning_rate, discount, epochs = 1e-4, 0.9, 2_000
+EPSILON_DECAY = 0.99
 loss_fn = torch.nn.MSELoss()
 model = torch.nn.Sequential(
-    torch.nn.Linear(4, 128),
-    torch.nn.ReLU(),
+    torch.nn.Linear(env.observation_space.shape[0], 128),
+    torch.nn.LeakyReLU(),
     torch.nn.Linear(128, 64),
-    torch.nn.ReLU(),
-    torch.nn.Linear(64, 2),
-    torch.nn.Softmax())
+    torch.nn.LeakyReLU(),
+    torch.nn.Linear(64, env.action_space.shape[0]))
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
 def change_to_tensor(np):
@@ -30,7 +29,7 @@ def test_env(n):
         env.reset()
         init_state = env.reset()
         while not done:
-            env.render()
+            #env.render()
             qval = model(change_to_tensor(init_state))
             qval_ = qval.data.numpy()
             action = np.argmax(qval_)
@@ -43,16 +42,16 @@ def test_env(n):
 
 def train_model():
     env = gym.make('CartPole-v0')
-    epsilon = 0.5
+    epsilon = 1
+    memory = Experience_Replay()
 
     for i in range(0, epochs):
-        env.reset()
         initial_state = env.reset()
         done = False
         score = 0
-        qval = model(change_to_tensor(initial_state))
 
         while not done:
+            qval = model(change_to_tensor(initial_state))
             if np.random.random() > epsilon:
                 qval_ = qval.data.numpy()
                 action = np.argmax(qval_)
@@ -60,28 +59,30 @@ def train_model():
                 action = env.action_space.sample()
             
             new_state, reward, done, _ = env.step(action)
-
-            if not done:
-                with torch.no_grad():
-                    newQ = model(change_to_tensor(new_state))
-                maxQ = torch.max(newQ)
-                Y = (reward + (discount * maxQ))
-            else:
-                Y = reward  
-
-            score += reward
-            Y = torch.Tensor([Y]).detach()
-            X = torch.Tensor([qval[action]])
-            X.requires_grad = True
-            loss = loss_fn(X, Y)
-
-            optimizer.zero_grad()
-            optimizer.step()
-
+            done_mask = 1.0 if done else 0.0
+            memory.put((initial_state, action, reward, new_state, done_mask))
             initial_state = new_state
+            score += reward
+            if done: break
+            
+            if len(memory.buffer) > memory.min_len:
+                s_T, a_T, r_T, s2_T, d_T = memory.sample()
+                Q1 = model(s_T)
+                with torch.no_grad():
+                    Q2 = model(s2_T)
+                    max_Q2 = Q2.max(1)[0].unsqueeze(1)
+
+                Y = (r_T + discount * ((1 - d_T) * max_Q2)).float()
+                X = Q1.gather(1, a_T)
+
+                loss = loss_fn(X, Y.detach())
+                losses.append(loss.item())
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
 
         scores.append(score)
-        if epsilon > 0.05:
+        if epsilon > 0.1:
             epsilon = epsilon * EPSILON_DECAY
         else:
             epsilon = 0
@@ -92,8 +93,13 @@ def draw_graph():
     plt.xlabel("Epochs",fontsize=22)
     plt.ylabel("Rewards",fontsize=22)
     plt.show()
+
+    plt.plot(losses)
+    plt.xlabel("Episodes",fontsize=22)
+    plt.ylabel("Losses",fontsize=22)
+    plt.show()
     #torch.save(model, 'model_Test.pt')
     
 train_model()
 draw_graph()
-#print(test_env(3))
+print(test_env(3))
